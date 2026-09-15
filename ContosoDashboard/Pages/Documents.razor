@@ -1,0 +1,312 @@
+@page "/documents"
+@using ContosoDashboard.Services
+@using ContosoDashboard.Models
+@using Microsoft.AspNetCore.Authorization
+@using System.Security.Claims
+@attribute [Authorize]
+@inject IDocumentService DocumentService
+@inject IProjectService ProjectService
+@inject AuthenticationStateProvider AuthenticationStateProvider
+
+<PageTitle>Documents - ContosoDashboard</PageTitle>
+
+<div class="container-fluid">
+    <div class="row mb-4">
+        <div class="col">
+            <h1>My Documents</h1>
+        </div>
+        <div class="col-auto">
+            <button class="btn btn-primary" @onclick="ShowUploadForm">
+                <i class="bi bi-cloud-upload"></i> Upload Document
+            </button>
+        </div>
+    </div>
+
+    @if (showUploadForm)
+    {
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">Upload a Document</h5>
+            </div>
+            <div class="card-body">
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label>Title *</label>
+                        <input class="form-control" @bind="uploadTitle" />
+                    </div>
+                    <div class="col-md-6">
+                        <label>Category *</label>
+                        <select class="form-select" @bind="uploadCategory">
+                            <option value="">Select a category</option>
+                            @foreach (var category in DocumentCategories.AllowedValues)
+                            {
+                                <option value="@category">@category</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label>Description</label>
+                        <textarea class="form-control" @bind="uploadDescription"></textarea>
+                    </div>
+                    <div class="col-md-3">
+                        <label>Associated Project</label>
+                        <select class="form-select" @bind="uploadProjectIdSelection">
+                            <option value="">None</option>
+                            @if (myProjects != null)
+                            {
+                                @foreach (var project in myProjects)
+                                {
+                                    <option value="@project.ProjectId">@project.Name</option>
+                                }
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label>Tags</label>
+                        <input class="form-control" @bind="uploadTags" placeholder="comma, separated" />
+                    </div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-md-8">
+                        <label>File * (max 25 MB — PDF, Word, Excel, PowerPoint, text, JPEG, PNG)</label>
+                        <InputFile OnChange="OnFileSelected" class="form-control" />
+                        @if (isUploading)
+                        {
+                            <div class="progress mt-2">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%">Uploading...</div>
+                            </div>
+                        }
+                    </div>
+                </div>
+                @if (!string.IsNullOrEmpty(uploadMessage))
+                {
+                    <div class="alert @(uploadSuccess ? "alert-success" : "alert-danger")">@uploadMessage</div>
+                }
+                <button class="btn btn-primary" @onclick="SubmitUpload" disabled="@isUploading">Upload</button>
+                <button class="btn btn-secondary" @onclick="@(() => showUploadForm = false)">Cancel</button>
+            </div>
+        </div>
+    }
+
+    <div class="row mb-3">
+        <div class="col-md-4">
+            <label>Search</label>
+            <input class="form-control" @bind="searchQuery" @bind:event="oninput" @onkeyup="OnSearchKeyUp" placeholder="Search by title, description, tag, uploader..." />
+        </div>
+        <div class="col-md-3">
+            <label>Category</label>
+            <select class="form-select" @bind="filterCategory">
+                <option value="">All</option>
+                @foreach (var category in DocumentCategories.AllowedValues)
+                {
+                    <option value="@category">@category</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label>Sort by</label>
+            <select class="form-select" @bind="sortByStr">
+                <option value="@nameof(DocumentSortBy.UploadDate)">Upload date</option>
+                <option value="@nameof(DocumentSortBy.Title)">Title</option>
+                <option value="@nameof(DocumentSortBy.Category)">Category</option>
+                <option value="@nameof(DocumentSortBy.FileSize)">File size</option>
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label>&nbsp;</label>
+            <button class="btn btn-secondary d-block w-100" @onclick="ApplyFilters">Apply</button>
+        </div>
+    </div>
+
+    @if (documents == null)
+    {
+        <p><em>Loading...</em></p>
+    }
+    else if (!documents.Any())
+    {
+        <div class="alert alert-info">No documents found.</div>
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th>Category</th>
+                        <th>Upload Date</th>
+                        <th>Size</th>
+                        <th>Project</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var doc in documents)
+                    {
+                        <tr>
+                            <td>
+                                <strong>@doc.Title</strong>
+                                @if (!string.IsNullOrEmpty(doc.Description))
+                                {
+                                    <br />
+                                    <small class="text-muted">@doc.Description</small>
+                                }
+                            </td>
+                            <td><span class="badge bg-secondary">@doc.Category</span></td>
+                            <td>@doc.UploadedDate.ToString("MMM dd, yyyy")</td>
+                            <td>@FormatFileSize(doc.FileSizeBytes)</td>
+                            <td>
+                                @if (doc.Project != null)
+                                {
+                                    <a href="/projects/@doc.ProjectId">@doc.Project.Name</a>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">-</span>
+                                }
+                            </td>
+                            <td>
+                                <a class="btn btn-sm btn-outline-primary" href="/api/documents/@doc.DocumentId/download" target="_blank">
+                                    <i class="bi bi-download"></i>
+                                </a>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+@code {
+    private List<Document>? documents;
+    private List<Project>? myProjects;
+    private int currentUserId = 0;
+
+    private bool showUploadForm = false;
+    private string uploadTitle = "";
+    private string uploadCategory = "";
+    private string uploadDescription = "";
+    private string uploadTags = "";
+    private string uploadProjectIdSelection = "";
+    private IBrowserFile? selectedFile;
+    private bool isUploading = false;
+    private string? uploadMessage;
+    private bool uploadSuccess;
+
+    private string searchQuery = "";
+    private string filterCategory = "";
+    private string sortByStr = nameof(DocumentSortBy.UploadDate);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var user = authState.User;
+        var userIdClaim = user.FindFirst(ClaimTypes.NameIdentifier);
+        if (userIdClaim != null && int.TryParse(userIdClaim.Value, out int userId))
+        {
+            currentUserId = userId;
+        }
+
+        if (currentUserId > 0)
+        {
+            myProjects = await ProjectService.GetUserProjectsAsync(currentUserId);
+            await LoadDocuments();
+        }
+    }
+
+    private async Task LoadDocuments()
+    {
+        var filter = string.IsNullOrEmpty(filterCategory) ? null : new DocumentFilter { Category = filterCategory };
+        var sortBy = Enum.Parse<DocumentSortBy>(sortByStr);
+        documents = await DocumentService.GetMyDocumentsAsync(currentUserId, sortBy, filter);
+    }
+
+    private async Task ApplyFilters() => await LoadDocuments();
+
+    private async Task OnSearchKeyUp(KeyboardEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(searchQuery))
+        {
+            await LoadDocuments();
+            return;
+        }
+
+        documents = await DocumentService.SearchAsync(currentUserId, searchQuery);
+    }
+
+    private void ShowUploadForm()
+    {
+        showUploadForm = true;
+        uploadMessage = null;
+    }
+
+    private void OnFileSelected(InputFileChangeEventArgs e)
+    {
+        selectedFile = e.File;
+    }
+
+    private async Task SubmitUpload()
+    {
+        if (selectedFile == null)
+        {
+            uploadSuccess = false;
+            uploadMessage = "Select a file to upload.";
+            return;
+        }
+
+        isUploading = true;
+        uploadMessage = null;
+
+        // research.md #3: capture metadata and buffer into a MemoryStream before releasing IBrowserFile
+        var fileName = selectedFile.Name;
+        var fileSize = selectedFile.Size;
+        var contentType = selectedFile.ContentType;
+
+        using var memoryStream = new MemoryStream();
+        using (var fileStream = selectedFile.OpenReadStream(maxAllowedSize: 25 * 1024 * 1024))
+        {
+            await fileStream.CopyToAsync(memoryStream);
+        }
+        memoryStream.Position = 0;
+        selectedFile = null;
+
+        var request = new DocumentUploadRequest
+        {
+            Title = uploadTitle,
+            Description = string.IsNullOrWhiteSpace(uploadDescription) ? null : uploadDescription,
+            Category = uploadCategory,
+            Tags = string.IsNullOrWhiteSpace(uploadTags) ? null : uploadTags,
+            ProjectId = int.TryParse(uploadProjectIdSelection, out var projectId) ? projectId : null,
+            FileName = fileName,
+            ContentType = contentType,
+            FileSizeBytes = fileSize,
+            FileStream = memoryStream
+        };
+
+        var result = await DocumentService.UploadAsync(currentUserId, request);
+
+        isUploading = false;
+        uploadSuccess = result.Success;
+        uploadMessage = result.Success ? $"'{fileName}' uploaded successfully." : result.ErrorMessage;
+
+        if (result.Success)
+        {
+            uploadTitle = "";
+            uploadCategory = "";
+            uploadDescription = "";
+            uploadTags = "";
+            uploadProjectIdSelection = "";
+            await LoadDocuments();
+        }
+    }
+
+    private static string FormatFileSize(long bytes)
+    {
+        if (bytes >= 1024 * 1024) return $"{bytes / (1024.0 * 1024.0):F1} MB";
+        if (bytes >= 1024) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes} B";
+    }
+}

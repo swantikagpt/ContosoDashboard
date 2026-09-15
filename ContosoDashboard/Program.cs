@@ -3,6 +3,8 @@ using ContosoDashboard.Data;
 using ContosoDashboard.Services;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Components.Authorization;
+using ContosoDashboard.Models;
+using System.Security.Claims;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -43,6 +45,18 @@ builder.Services.AddScoped<ITaskService, TaskService>();
 builder.Services.AddScoped<IProjectService, ProjectService>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IDashboardService, DashboardService>();
+builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
+builder.Services.AddScoped<IDocumentService, DocumentService>();
+
+if (builder.Environment.IsDevelopment() && builder.Configuration["ClamAv:Host"] is null)
+{
+    // No ClamAV configured for local dev (research.md #1 follow-up) — never used outside Development.
+    builder.Services.AddScoped<IVirusScanner, NoOpVirusScanner>();
+}
+else
+{
+    builder.Services.AddScoped<IVirusScanner, ClamAvVirusScanner>();
+}
 
 // Add HttpContextAccessor for accessing user claims
 builder.Services.AddHttpContextAccessor();
@@ -105,7 +119,58 @@ app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
 
+// Document download/preview endpoints (contracts/document-download-endpoint.md).
+// Files live outside wwwroot, so these are the only HTTP-level access path to file bytes.
+app.MapGet("/api/documents/{id:int}/download", async (int id, HttpContext httpContext, IDocumentService documentService, IFileStorageService fileStorageService, ApplicationDbContext dbContext) =>
+{
+    var userId = GetUserId(httpContext);
+    if (userId is null) return Results.Unauthorized();
+
+    // GetByIdAsync returns null for both "does not exist" and "not authorized" — never disclose which.
+    var document = await documentService.GetByIdAsync(userId.Value, id);
+    if (document is null) return Results.NotFound();
+
+    var stream = await fileStorageService.DownloadAsync(document.FilePath);
+
+    dbContext.DocumentActivityLogs.Add(new DocumentActivityLog
+    {
+        DocumentId = document.DocumentId,
+        DocumentTitleSnapshot = document.Title,
+        ActionType = DocumentActivityType.Download,
+        PerformedByUserId = userId.Value,
+        OccurredDate = DateTime.UtcNow
+    });
+    await dbContext.SaveChangesAsync();
+
+    return Results.Stream(stream, document.FileType, document.FileName);
+}).RequireAuthorization();
+
+app.MapGet("/api/documents/{id:int}/preview", async (int id, HttpContext httpContext, IDocumentService documentService, IFileStorageService fileStorageService) =>
+{
+    var userId = GetUserId(httpContext);
+    if (userId is null) return Results.Unauthorized();
+
+    var document = await documentService.GetByIdAsync(userId.Value, id);
+    if (document is null) return Results.NotFound();
+
+    var previewableTypes = new[] { "application/pdf", "image/jpeg", "image/png" };
+    if (!previewableTypes.Contains(document.FileType))
+    {
+        return Results.BadRequest("This file type cannot be previewed.");
+    }
+
+    var stream = await fileStorageService.DownloadAsync(document.FilePath);
+    httpContext.Response.Headers["Content-Disposition"] = "inline";
+    return Results.Stream(stream, document.FileType);
+}).RequireAuthorization();
+
 app.MapBlazorHub();
 app.MapFallbackToPage("/_Host");
 
 app.Run();
+
+static int? GetUserId(HttpContext context)
+{
+    var claim = context.User.FindFirst(ClaimTypes.NameIdentifier);
+    return claim != null && int.TryParse(claim.Value, out var userId) ? userId : null;
+}

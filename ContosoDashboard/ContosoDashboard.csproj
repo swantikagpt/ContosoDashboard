@@ -15,6 +15,7 @@
     </PackageReference>
     <PackageReference Include="Microsoft.Identity.Web" Version="2.15.1" />
     <PackageReference Include="Microsoft.Identity.Web.UI" Version="2.15.1" />
+    <PackageReference Include="nClam" Version="9.0.0" />
   </ItemGroup>
 
 </Project>
