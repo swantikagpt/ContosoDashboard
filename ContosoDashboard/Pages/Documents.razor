@@ -224,10 +224,16 @@
         documents = await DocumentService.GetMyDocumentsAsync(currentUserId, sortBy, filter);
     }
 
-    private async Task ApplyFilters() => await LoadDocuments();
+    private async Task ApplyFilters()
+    {
+        uploadMessage = null; // the last upload's result no longer applies once the list changes
+        await LoadDocuments();
+    }
 
     private async Task OnSearchKeyUp(KeyboardEventArgs e)
     {
+        uploadMessage = null; // the last upload's result no longer applies once the list changes
+
         if (string.IsNullOrWhiteSpace(searchQuery))
         {
             await LoadDocuments();
@@ -250,6 +256,24 @@
 
     private async Task SubmitUpload()
     {
+        // Validate form fields that have nothing to do with the file itself BEFORE touching
+        // selectedFile at all. Otherwise a fixable mistake here (e.g. no category chosen) would
+        // still consume/clear the selected file below, forcing the user to re-pick the same file
+        // even though its name is still showing in the file input.
+        if (string.IsNullOrWhiteSpace(uploadTitle))
+        {
+            uploadSuccess = false;
+            uploadMessage = "A document title is required.";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(uploadCategory))
+        {
+            uploadSuccess = false;
+            uploadMessage = "Select a category.";
+            return;
+        }
+
         if (selectedFile == null)
         {
             uploadSuccess = false;
@@ -260,46 +284,73 @@
         isUploading = true;
         uploadMessage = null;
 
+        const long maxFileSizeBytes = 25 * 1024 * 1024; // must match FR-003 / DocumentService.MaxFileSizeBytes
+
         // research.md #3: capture metadata and buffer into a MemoryStream before releasing IBrowserFile
         var fileName = selectedFile.Name;
         var fileSize = selectedFile.Size;
         var contentType = selectedFile.ContentType;
 
-        using var memoryStream = new MemoryStream();
-        using (var fileStream = selectedFile.OpenReadStream(maxAllowedSize: 25 * 1024 * 1024))
+        // Check the size BEFORE calling OpenReadStream: IBrowserFile.OpenReadStream throws as soon as
+        // the actual file exceeds maxAllowedSize, and an uncaught exception here kills the whole
+        // Blazor Server circuit rather than showing a friendly message (this was FR-003's bug).
+        if (fileSize > maxFileSizeBytes)
         {
-            await fileStream.CopyToAsync(memoryStream);
+            isUploading = false;
+            uploadSuccess = false;
+            uploadMessage = "This file exceeds the 25 MB size limit.";
+            selectedFile = null;
+            return;
         }
-        memoryStream.Position = 0;
-        selectedFile = null;
 
-        var request = new DocumentUploadRequest
+        try
         {
-            Title = uploadTitle,
-            Description = string.IsNullOrWhiteSpace(uploadDescription) ? null : uploadDescription,
-            Category = uploadCategory,
-            Tags = string.IsNullOrWhiteSpace(uploadTags) ? null : uploadTags,
-            ProjectId = int.TryParse(uploadProjectIdSelection, out var projectId) ? projectId : null,
-            FileName = fileName,
-            ContentType = contentType,
-            FileSizeBytes = fileSize,
-            FileStream = memoryStream
-        };
+            using var memoryStream = new MemoryStream();
+            using (var fileStream = selectedFile.OpenReadStream(maxAllowedSize: maxFileSizeBytes))
+            {
+                await fileStream.CopyToAsync(memoryStream);
+            }
+            memoryStream.Position = 0;
+            selectedFile = null;
 
-        var result = await DocumentService.UploadAsync(currentUserId, request);
+            var request = new DocumentUploadRequest
+            {
+                Title = uploadTitle,
+                Description = string.IsNullOrWhiteSpace(uploadDescription) ? null : uploadDescription,
+                Category = uploadCategory,
+                Tags = string.IsNullOrWhiteSpace(uploadTags) ? null : uploadTags,
+                ProjectId = int.TryParse(uploadProjectIdSelection, out var projectId) ? projectId : null,
+                FileName = fileName,
+                ContentType = contentType,
+                FileSizeBytes = fileSize,
+                FileStream = memoryStream
+            };
 
-        isUploading = false;
-        uploadSuccess = result.Success;
-        uploadMessage = result.Success ? $"'{fileName}' uploaded successfully." : result.ErrorMessage;
+            var result = await DocumentService.UploadAsync(currentUserId, request);
 
-        if (result.Success)
+            uploadSuccess = result.Success;
+            uploadMessage = result.Success ? $"'{fileName}' uploaded successfully." : result.ErrorMessage;
+
+            if (result.Success)
+            {
+                uploadTitle = "";
+                uploadCategory = "";
+                uploadDescription = "";
+                uploadTags = "";
+                uploadProjectIdSelection = "";
+                await LoadDocuments();
+            }
+        }
+        catch (Exception ex)
         {
-            uploadTitle = "";
-            uploadCategory = "";
-            uploadDescription = "";
-            uploadTags = "";
-            uploadProjectIdSelection = "";
-            await LoadDocuments();
+            // Never let an upload failure take down the circuit — show a message instead.
+            uploadSuccess = false;
+            uploadMessage = "Something went wrong while uploading this file. Please try again.";
+            Console.WriteLine($"Document upload error: {ex.Message}");
+        }
+        finally
+        {
+            isUploading = false;
         }
     }
 
